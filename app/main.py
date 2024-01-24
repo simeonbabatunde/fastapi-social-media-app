@@ -1,70 +1,81 @@
-from typing import Optional
-from fastapi import FastAPI, Response, status, HTTPException
-from pydantic import BaseModel
-from random import randrange
+from typing import List
+from fastapi import FastAPI, Response, status, HTTPException, Depends
+from sqlalchemy.orm import Session
+from . import models, schemas
+from .database import engine, get_db
+
+models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
-
-class Post(BaseModel):
-    title: str
-    content: str
-    published: bool = True
-    rating: Optional[int] = None
-
-# In memory posts
-my_posts = [{"title": "Title of post 1", "content": "Post 1 content", "id": 1}, {"title": "Best foods", "content": "I enjoy pizza", "id": 2}]
-
-# Util functions
-def find_post_by_id(id):
-    for post in my_posts:
-        if post['id'] == id:
-            return post
-
-def find_post_index(id):
-    for idx, post in enumerate(my_posts):
-        if post['id'] == id:
-            return idx
-
-
 
 @app.get("/")
 async def root():
     return {"message": "Hello World!!!"}
 
-@app.get("/posts")
-def get_posts():
-    return {"data": my_posts}
+# Get all posts
+@app.get("/posts", response_model=List[schemas.Post])
+def get_posts(db: Session = Depends(get_db)):
+    posts = db.query(models.Post).all()
 
-@app.post("/posts", status_code=status.HTTP_201_CREATED)
-def create_post(post: Post):
-    post_dict = post.model_dump()
-    post_dict["id"] = randrange(1, 10000000)
-    my_posts.append(post_dict)
-    return {"new_post": post_dict}
+    return posts
 
-@app.get("/posts/{id}")
-def get_post(id: int):
-    post = find_post_by_id(id)
+# Create post
+@app.post("/posts", status_code=status.HTTP_201_CREATED, response_model=schemas.Post)
+def create_post(post: schemas.PostCreate, db: Session = Depends(get_db)):
+    new_post = models.Post(**post.model_dump())
+    db.add(new_post)
+    db.commit()
+    db.refresh(new_post)
+
+    return new_post
+
+# Get post by id
+@app.get("/posts/{id}", response_model=schemas.Post)
+def get_post(id: int, db: Session = Depends(get_db)):
+    post = db.query(models.Post).filter(models.Post.id == id).first()
+
     if not post:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"post with id: {id} not found")
-    return {"detail": post}
+    
+    return post
 
+# Delete post by id
 @app.delete("/posts/{id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_post(id: int):
-    index = find_post_index(id)
-    if index == None:
+def delete_post(id: int, db: Session = Depends(get_db)):
+   post = db.query(models.Post).filter(models.Post.id == id)
+
+   if post.first() == None:
+       raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'post with id: {id} not found')
+   
+   post.delete(synchronize_session=False)
+   db.commit()
+   
+   return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+# Update post by id
+@app.put("/posts/{id}", response_model=schemas.Post)
+def update_post(id: int, post: schemas.PostCreate, db: Session = Depends(get_db)):
+    post_query = db.query(models.Post).filter(models.Post.id == id)
+
+    if post_query.first() == None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'post with id: {id} not found')
-    my_posts.pop(index)
+    
+    post_query.update(post.model_dump(), synchronize_session=False)
+    db.commit()
 
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return post_query.first()
 
-@app.put("/posts/{id}")
-def update_post(id: int, post: Post):
-    index = find_post_index(id)
-    if index == None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'post with id: {id} not found')
-    post_dict = post.model_dump()
-    post_dict["id"] = id
-    my_posts[index] = post_dict
+# Create User
+@app.post("/users", status_code=status.HTTP_201_CREATED, response_model=schemas.UserResponse)
+def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    user_exist = db.query(models.User).filter(models.User.email == user.email).first()
 
-    return {"detail": post_dict}
+    if user_exist:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f'User with email: {user.email} already exists')
+
+    new_user = models.User(**user.model_dump())
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    return new_user
